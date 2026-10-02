@@ -27,6 +27,9 @@ const LIST_MAX = 10;
 // The call being held, or null. One at a time: Bash calls in a turn run in order.
 let held = null;
 
+// The session's scoreboard, shown in the status line. Cosmetic: a reload resets it.
+const tally = { held: 0, refused: 0, ran: 0 };
+
 export function register(on) {
   on("tool.call", { tool: "Bash" }, async ($, e, next) => {
     const risk = classify(String(e.command ?? ""));
@@ -93,6 +96,21 @@ export function register(on) {
         held = null;
       }
       $.ui.invalidate("ui.render");
+    }
+
+    tally.held += 1;
+    if (decision === "proceed") {
+      tally.ran += 1;
+    } else {
+      tally.refused += 1;
+    }
+    try {
+      $.ui.status(`shield: ${tally.held} held, ${tally.refused} refused, ${tally.ran} ran`);
+      if (decision === "cancel") {
+        $.ui.toast(`Blast Shield spared you: ${summary}`);
+      }
+    } catch {
+      // the scoreboard is cosmetic; never let it change the answer
     }
 
     if (decision === "proceed") {
