@@ -44,6 +44,22 @@ check("odd filename survives", x.rep.summary.length > 0, x.rep);
 x = await m("git push -uf origin main");
 check("push -uf reports no remote copy", x.rep.note.includes("origin/main") || x.rep.summary.includes("force-push"), x.rep);
 
+// consequences beyond the code
+sh("mkdir -p .github/workflows db/migrations && echo x>.github/workflows/ci.yml && echo s>.env && echo m>db/migrations/0002_drop_users.sql && git add -f . && git commit -qm more", d);
+const imp = (r) => (r.rep.impact ?? []).join(" | ");
+x = await m("rm -rf .env");
+check("rm .env: restorable count and env warning", /tracked and unmodified/.test(imp(x)) && /environment file/.test(imp(x)), x.rep);
+x = await m("rm -rf db/migrations");
+check("rm migrations: drift warning", /migration/.test(imp(x)), x.rep);
+x = await m("git push --force origin feat");
+check("force push: CI workflow noted", /CI workflow/.test(imp(x)), x.rep);
+x = await m("psql -c 'DROP TABLE users CASCADE'");
+check("sql: cascade noted", /CASCADE/.test(imp(x)), x.rep);
+x = await m("kubectl delete namespace prod-x");
+check("kubectl: never throws, has report", x.rep.summary.length > 0 && Array.isArray(x.rep.impact ?? []), x.rep);
+x = await m("chmod -R 777 /");
+check("chmod 777 /: broad and world-writable", /broad folder/.test(imp(x)) && /every local user/.test(imp(x)), x.rep);
+
 // classifier robustness
 for (const c of ["", "   ", ";;", "rm", "git", "git -C", "sudo", "timeout", "timeout 5", "env", "find", "xargs", "kubectl", "terraform", "docker", "psql", "chmod -R", "git restore", "git branch -D", "((("]) {
   try { classify(c); check(`no throw: ${JSON.stringify(c)}`, true); } catch (e) { check(`no throw: ${JSON.stringify(c)}`, false, String(e)); }

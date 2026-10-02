@@ -124,7 +124,7 @@ export function register(on) {
       error: "Blast Shield hit an error while holding it",
     }[decision] ?? "no answer was recorded";
     return {
-      deny: `Blast Shield held this command and did not run it: ${why}. It would have: ${summary}. It matched the rule for ${risk.label}. Do not retry it unless the user asks you to.`,
+      deny: `Blast Shield held this command and did not run it: ${why}. It would have: ${summary}. It matched the rule for ${risk.label}.${impactForClaude(mine)} Do not retry it unless the user asks you to.`,
     };
   });
 
@@ -141,6 +141,11 @@ export function register(on) {
     }
     return draw($.ui.resolve(e), held);
   });
+}
+
+function impactForClaude(held) {
+  const lines = held?.report?.impact;
+  return Array.isArray(lines) && lines.length > 0 ? ` Consequences: ${lines.join(" ")}` : "";
 }
 
 // ---- What counts as risky -------------------------------------------------
@@ -352,7 +357,7 @@ function classifyInfra(cmd, args, dir) {
     const [a, b] = plain;
     const flags = args.filter((x) => x.startsWith("-"));
     if ((a === "system" && b === "prune") || (a === "volume" && (b === "prune" || b === "rm" || b === "remove")) || (a === "image" && b === "prune" && flags.some((f) => /^-[a-z]*a/.test(f) || f === "--all"))) {
-      return { kind: "opaque", label: `${base} ${a} ${b}`, note: "Removes containers, images or volumes. Volumes hold data that can't be recovered. I can't list them before it runs." };
+      return { kind: "opaque", label: `${base} ${a} ${b}`, docker: { bin: base, a, b, names: plain.slice(2) }, note: "Removes containers, images or volumes. Volumes hold data that can't be recovered. I can't list them before it runs." };
     }
     if (a === "compose" || base === "docker-compose") {
       const sub = a === "compose" ? b : a;
@@ -393,7 +398,7 @@ function classifyInfra(cmd, args, dir) {
   }
   if ((base === "chmod" || base === "chown" || base === "chgrp") && args.some((a) => a === "--recursive" || /^-[a-zA-Z]*R[a-zA-Z]*$/.test(a))) {
     const rest = args.filter((a) => !a.startsWith("-"));
-    return { kind: "rm", verb: `${base} -R`, label: `${base} -R`, targets: rest.slice(1), dir };
+    return { kind: "rm", verb: `${base} -R`, label: `${base} -R`, mode: rest[0], targets: rest.slice(1), dir };
   }
   return null;
 }
@@ -426,6 +431,19 @@ function tokenize(text) {
 
 /** { summary, lines, note } for the pane. Never throws: a failed read is said, not hidden. */
 export async function measure($, risk, cwd) {
+  const report = await measureCore($, risk, cwd);
+  try {
+    const impact = await consequences($, risk, cwd, report);
+    if (impact.length > 0) {
+      report.impact = impact;
+    }
+  } catch {
+    // consequences are extra context; a failed probe must never hide the report
+  }
+  return report;
+}
+
+async function measureCore($, risk, cwd) {
   try {
     if (risk.kind === "rm") {
       return await measureRm($, risk, cwd);
@@ -455,6 +473,186 @@ export async function measure($, risk, cwd) {
   } catch (error) {
     return { summary: `${risk.label} (could not measure it)`, lines: [], note: `Could not measure: ${String(error?.message ?? error).slice(0, 200)}` };
   }
+}
+
+// ---- Consequences beyond the command ----------------------------------------
+// What else this touches: git recoverability, CI, pull requests, databases, clusters,
+// secrets. Every line comes from something read here (a file name, a probe's output),
+// never a guess about your project. Probes are read-only and time-limited.
+
+const IMPACT_MAX = 5;
+const PROD = /\b(prod|production|prd|live)\b/i;
+const BUILD_DIRS = /(^|\/)(node_modules|dist|build|out|target|\.next|\.nuxt|__pycache__|\.cache|coverage|\.turbo|\.venv|venv)\/?$/;
+const SHARED_BRANCH = /^(main|master|develop|development|trunk|release.*|prod|production|staging)$/;
+const DATA_STORE = /(aws_db_|aws_rds|aws_dynamodb|aws_s3_bucket|aws_elasticache|aws_ebs|aws_efs|google_sql|google_storage_bucket|google_bigquery|google_spanner|azurerm_(sql|mssql|storage|cosmosdb|postgresql|mysql)|kubernetes_persistent|_database\b|_bucket\b|_volume\b|_disk\b)/i;
+const DESTRUCTIVE_NAME = /(drop|remove|delete|destroy|truncate|purge)/i;
+const BROAD_TARGET = /^(\/|~|\.|\.\.|\*|\/\*)$/;
+
+// What a path name says about what else breaks. First hit per rule.
+const PATH_FACTS = [
+  [/(^|[\/\s])\.env(\.|$|\s)/, "Includes an environment file (.env): secrets in it may exist nowhere else."],
+  [/(^|[\/\s])\.git(\/|$)/, "Includes .git: that deletes this folder's repository history."],
+  [/\.(sqlite3?|db)(\s|$)/i, "Includes a local database file: its data is not in git unless it was committed."],
+  [/(^|[\/\s])\.ssh(\/|$)|id_(rsa|ed25519)|\.pem(\s|$)/, "Includes SSH keys or certificates: deleting or loosening them can lock you out of servers."],
+  [/(^|[\/\s])\.(aws|kube|config)(\/|$)/, "Includes credentials or config for cloud tooling."],
+  [/(^|[\/\s])(migrations?|schema)(\/|\.|$)/i, "Touches database migration or schema files: environments that already applied them will drift."],
+  [/(^|[\/\s])\.github\/workflows(\/|$)/, "Touches CI workflows: pipelines will stop or change on the next push."],
+  [/(^|[\/\s])(public|static|assets)\//, "Touches files served to users: pages or images may break."],
+  [/(^|[\/\s])(package\.json|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|Cargo\.lock|poetry\.lock|Gemfile\.lock|go\.sum)(\s|$)/, "Touches dependency manifests or lockfiles: builds and CI may resolve different versions."],
+];
+
+async function consequences($, risk, cwd, report) {
+  const out = [];
+  const add = (text) => {
+    if (text && out.length < IMPACT_MAX && !out.includes(text)) {
+      out.push(text);
+    }
+  };
+  const run = (argv, ms = 8000) => runOrFail($, argv, cwd, ms);
+  const lines = report.lines ?? [];
+
+  const prod = (risk.segment ?? "").match(PROD);
+  if (prod) {
+    add(`The command line mentions "${prod[0]}": this may be a live system.`);
+  }
+
+  if (risk.kind === "rm" && !risk.verb) {
+    const tracked = await run(["git", "ls-files", "--", ...risk.targets]);
+    if (tracked.exitCode !== 0) {
+      add("Not inside a git repo here, or outside it, so git can't restore these.");
+    } else if (report.files > 0) {
+      const modified = await run(["git", "ls-files", "-m", "--", ...risk.targets]);
+      const count = (r) => r.stdout.split("\n").filter((l) => l !== "").length;
+      const back = Math.max(0, count(tracked) - count(modified));
+      const gone = Math.max(0, report.files - back);
+      add(`${back} of ${report.files} files are tracked and unmodified, so git can restore them. ${gone} can't be restored from git.`);
+    }
+    if (risk.targets.length > 0 && risk.targets.every((t) => BUILD_DIRS.test(t))) {
+      add("Looks like regenerable build output or dependencies: rebuilding or reinstalling should recreate it.");
+    }
+  }
+
+  if (risk.kind === "rm" || risk.kind === "find-delete" || risk.kind.startsWith("git-")) {
+    const names = [...(risk.targets ?? []), ...lines];
+    for (const [pattern, text] of PATH_FACTS) {
+      if (names.some((n) => pattern.test(n))) {
+        add(text);
+      }
+    }
+  }
+
+  if (risk.verb) {
+    if ((risk.targets ?? []).some((t) => BROAD_TARGET.test(t))) {
+      add("A recursive change on a broad folder can lock you out (SSH keys need strict modes) or strip executable bits.");
+    }
+    if (/^(0?777|0?666|a\+[rwx]*w|o\+[rwx]*w)/.test(risk.mode ?? "")) {
+      add("That mode makes files writable by every local user.");
+    }
+    if (risk.verb.startsWith("chown") || risk.verb.startsWith("chgrp")) {
+      add("Services that run as the old owner may lose access to these files.");
+    }
+  }
+
+  if (risk.kind === "git-push-force") {
+    const flows = await run(["bash", "-c", "ls .github/workflows 2>/dev/null | wc -l"], 5000);
+    const n = Number(flows.stdout.trim()) || 0;
+    if (n > 0) {
+      add(`${n} CI workflow ${n === 1 ? "file" : "files"} in .github/workflows: a push re-runs the ones that trigger on push.`);
+    }
+    if (risk.branch) {
+      if (SHARED_BRANCH.test(risk.branch)) {
+        add(`"${risk.branch}" looks like a shared branch: anyone who pulled it will have diverged history.`);
+      }
+      const pr = await run(["gh", "pr", "list", "--head", risk.branch, "--json", "number,title", "--limit", "3"]);
+      if (pr.exitCode === 0) {
+        let prs = [];
+        try {
+          prs = JSON.parse(pr.stdout || "[]");
+        } catch {
+          prs = [];
+        }
+        for (const p of prs) {
+          add(`Open pull request #${p.number} "${String(p.title).slice(0, 50)}" is on this branch: a force-push rewrites it and can stale reviews and approvals.`);
+        }
+      }
+    }
+  }
+
+  if (risk.kind === "migrate") {
+    const bad = lines.filter((l) => DESTRUCTIVE_NAME.test(l));
+    if (bad.length > 0) {
+      add(`${bad.length} pending ${bad.length === 1 ? "migration has a" : "migrations have"} destructive-looking ${bad.length === 1 ? "name" : "names"} (drop, remove, delete): ${bad[0].trim().slice(0, 60)}. Read ${bad.length === 1 ? "it" : "them"} for data loss.`);
+    }
+    add("Migrations run on the database your environment points to (settings, DATABASE_URL), which may not be your local one.");
+  }
+
+  if (risk.kind === "kubectl-delete") {
+    const ctx = await run([risk.bin, "config", "current-context"], 5000);
+    if (ctx.exitCode === 0 && ctx.stdout.trim() !== "") {
+      const name = ctx.stdout.trim();
+      add(`Cluster context: ${name}${PROD.test(name) ? " (looks like production)" : ""}.`);
+    }
+    const kinds = lines.map((l) => l.split(/[\s/.]/)[0].toLowerCase());
+    if (kinds.some((k) => k === "namespace" || k === "ns")) {
+      add("Deleting a namespace deletes everything inside it.");
+    }
+    if (kinds.some((k) => /^(persistentvolumeclaim|pvc|persistentvolume|pv|statefulset)/.test(k))) {
+      add("Persistent storage is involved: data may be deleted with it, depending on the reclaim policy.");
+    }
+    if (kinds.some((k) => /^(deployment|daemonset|service|ingress|statefulset)/.test(k))) {
+      add("Running workloads or routes stop: traffic to them fails until they are recreated.");
+    }
+  }
+
+  if (risk.kind === "terraform-destroy") {
+    const ws = await run([risk.bin, "workspace", "show"], 8000);
+    if (ws.exitCode === 0 && ws.stdout.trim() !== "") {
+      const name = ws.stdout.trim();
+      add(`Workspace: ${name}${PROD.test(name) ? " (looks like production)" : ""}.`);
+    }
+    const stores = lines.filter((l) => DATA_STORE.test(l));
+    if (stores.length > 0) {
+      add(`Includes data stores (${stores.slice(0, 3).join(", ")}): destroying them deletes their data unless it is backed up.`);
+    }
+  }
+
+  if (risk.docker) {
+    const { bin, a, b, names } = risk.docker;
+    if (a === "system" && b === "prune") {
+      const df = await run([bin, "system", "df"], 10000);
+      if (df.exitCode === 0) {
+        add(`Current usage: ${df.stdout.trim().split("\n").slice(1, 5).map((l) => l.trim().replace(/\s{2,}/g, " ")).join("; ")}`);
+      }
+    }
+    if (a === "volume" && b === "prune") {
+      const vols = await run([bin, "volume", "ls", "-f", "dangling=true", "-q"], 8000);
+      const list = vols.stdout.split("\n").filter((l) => l !== "");
+      if (vols.exitCode === 0) {
+        add(list.length === 0 ? "No unused volumes right now." : `${list.length} unused ${list.length === 1 ? "volume" : "volumes"} would be deleted: ${list.slice(0, 5).join(", ")}.`);
+      }
+    }
+    if (a === "volume" && (b === "rm" || b === "remove")) {
+      for (const name of names.slice(0, 3)) {
+        const users = await run([bin, "ps", "-a", "--filter", `volume=${name}`, "--format", "{{.Names}}"], 8000);
+        const list = users.stdout.split("\n").filter((l) => l !== "");
+        if (users.exitCode === 0 && list.length > 0) {
+          add(`Volume ${name} is used by: ${list.slice(0, 4).join(", ")}.`);
+        }
+      }
+    }
+  }
+
+  if (risk.kind === "opaque" && /: destructive statement$/.test(risk.label)) {
+    if (/\bcascade\b/i.test(risk.segment ?? "")) {
+      add("CASCADE also drops dependent objects, such as views and foreign-key tables.");
+    }
+    add("Anything reading this data (the app, jobs, reports) sees it gone at once; recovery needs a backup or point-in-time restore.");
+  }
+
+  if (risk.kind === "find-delete" || risk.kind === "opaque" && risk.label === "xargs rm") {
+    add("Deleted files skip the trash, and a different match later can delete different files.");
+  }
+  return out;
 }
 
 // The paths are passed to bash as arguments, never as source, so nothing in
@@ -494,6 +692,7 @@ async function measureRm($, risk, cwd) {
     return { summary: `${verb} ${found} ${found === 1 ? "path" : "paths"} with no files in ${found === 1 ? "it" : "them"}`, lines: [], note: `Paths: ${risk.targets.join(" ")}` };
   }
   return {
+    files,
     summary: `${verb} ${files} ${files === 1 ? "file" : "files"} (about ${size(bytes)})`,
     lines: rest.map((l) => l.replace(/^\.\//, "")),
     more: Math.max(0, files - rest.length),
@@ -654,6 +853,7 @@ async function measurePush($, risk, cwd) {
     source = "HEAD";
   }
   source = source || "HEAD";
+  risk.branch = branch;
   const ref = `${remote}/${branch}`;
   const known = await $.process.run(["git", "rev-parse", "--verify", "--quiet", ref], { cwd, timeoutMs: 10000 });
   if (known.exitCode !== 0) {
@@ -716,7 +916,7 @@ function size(bytes) {
 // ---- Drawing --------------------------------------------------------------
 
 function paneRows(report) {
-  return Math.min(27, 14 + report.lines.length + (report.more ? 1 : 0));
+  return Math.min(31, 15 + (report.impact?.length ?? 0) + report.lines.length + (report.more ? 1 : 0));
 }
 
 // Whether the user can take it back, in plain words, by kind of risk.
@@ -776,6 +976,16 @@ function draw(t, state) {
       Text({ key: "cmd", children: [Text({ dimColor: true, children: "Command  " }), Text({ bold: true, children: state.command.length > 300 ? `${state.command.slice(0, 300)}... (${state.command.length} characters)` : state.command })], wrap: "wrap" }),
       Text({ key: "sum", children: [Text({ dimColor: true, children: "Would    " }), Text({ color: "red", bold: true, children: report.summary })], wrap: "wrap" }),
       Text({ key: "why", children: [Text({ dimColor: true, children: "Held     " }), Text({ children: whyHeld(state) })], wrap: "wrap" }),
+      report.impact && report.impact.length > 0
+        ? Box({
+            key: "impact",
+            flexDirection: "column",
+            children: [
+              Text({ key: "ih", dimColor: true, children: "Impact" }),
+              ...report.impact.map((line, i) => Text({ key: `i${i}`, children: `  · ${line}`, wrap: "wrap" })),
+            ],
+          })
+        : null,
       undoLine(state.risk) ? Text({ key: "undo", children: [Text({ dimColor: true, children: "Undo     " }), Text({ children: undoLine(state.risk) })], wrap: "wrap" }) : null,
       Box({ key: "list", flexDirection: "column", marginTop: 1, children: list }),
       report.note ? Text({ key: "note", dimColor: true, italic: true, children: report.note, wrap: "wrap" }) : null,

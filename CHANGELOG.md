@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.1.0
+
+- New **Impact** section in the pane: what else the command touches beyond the files, from read-only probes.
+  - Deletes: how many files git can restore versus not, files outside a repo, regenerable build output, and path warnings (environment files, `.git`, local databases, SSH keys, migrations, CI workflows, lockfiles, served assets).
+  - Force-push: CI workflows that will re-run, open pull requests on the branch (needs `gh`), shared branch names.
+  - Migrations: destructive-looking migration names, and that they run on the database your environment points to.
+  - kubectl: current cluster context, namespace, storage and workload effects. Terraform: workspace and data-store resources. Docker: usage, unused volumes, containers using a volume.
+  - SQL: CASCADE and downstream readers. `prod`/`production` in the command line. Broad or world-writable `chmod`/`chown`.
+- Claude's refusal message now includes the consequences, so it can explain them.
+
 ## 1.0.0
 
 First release of Blast Shield, forked from Blast Radius (see NOTICE).
