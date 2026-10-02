@@ -35,6 +35,7 @@ When Claude calls Bash with a risky command, the mod holds the call, measures wh
 - **Would**: what it will do, in numbers where they can be measured.
 - **Held**: which rule matched, and which part of the line when there are several commands.
 - **Undo**: whether you can take it back.
+- **Impact**: what else it touches, such as CI, open pull requests, databases, clusters, secrets. Each line comes from something read (a file name, a probe's output), not a guess about your project. At most 5 lines.
 - Below that: the first 10 items, then a note on where the numbers came from.
 - Press `1` to run it as written, `2` to refuse it. Cancel has focus, so Enter refuses. No answer in 10 minutes refuses it.
 
