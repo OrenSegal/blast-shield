@@ -1,8 +1,22 @@
 # Blast Shield
 
+[![test](https://github.com/OrenSegal/blast-shield/actions/workflows/test.yml/badge.svg)](https://github.com/OrenSegal/blast-shield/actions/workflows/test.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 **See what a command will change before it runs.** Blast Shield is a Claude Code mod that holds risky shell commands, shows what they would touch and whether you can undo it, and runs them only when you press Proceed.
 
 > Blast Shield is a modified fork of [Blast Radius](https://github.com/anthropics/claude-code-playground/tree/main/claude-code/mods/blast-radius), the mod Anthropic's DevRel team shared in claude-code-playground. The original idea, the hold-and-ask design and the first set of dry runs are theirs. Blast Shield widens the coverage and the explanations. See [NOTICE](NOTICE) for exactly what changed. Not an official Anthropic product, and not endorsed by Anthropic.
+
+Related: [sous](https://github.com/OrenSegal/sous) hard-blocks destructive commands; Blast Shield previews them and asks.
+
+## Differences from Blast Radius
+
+- More git commands held: `checkout`/`restore` with paths, `push -uf`, `branch -D`, `stash drop`/`clear`.
+- More commands held: `find` with its delete action, `xargs rm`, `kubectl delete`, `terraform`/`tofu destroy`, Docker/Podman prune and volume removal, destructive SQL, recursive `chmod`/`chown`/`chgrp`.
+- Sees through the `timeout`, `doas`, `env` and `time` wrappers.
+- Dry runs for kubectl, terraform, find, branch deletes and stashes; `rm` globs no longer count dotfiles the shell would not expand.
+- Pane adds Held, Undo and Impact lines and wraps the command; the refusal message names the matched rule and its consequences.
+- Classifier tests and a real-process verification script.
 
 ## How it works
 
@@ -76,6 +90,8 @@ Try it in a throwaway folder: ask Claude to delete a build folder.
 claude plugin test .     # classifier tests
 node test/verify.mjs     # measures against a real temp git repo, with real processes
 ```
+
+CI runs `node test/verify.mjs` on Ubuntu and macOS. The classifier tests need the `claude` CLI, so they run locally only.
 
 The pane and the live hold have no automated test yet. They were not exercised end to end before release.
 
