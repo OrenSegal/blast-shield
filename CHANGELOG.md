@@ -1,5 +1,9 @@
 # Changelog
 
+
+## 1.2.1
+
+- Status line scoreboard is shorter: `1 held · 0 refused · 1 ran`, without the redundant `shield:` prefix.
 ## 1.2.0
 
 - `find` with its delete action reports `$VAR`, `$(...)`, backticks, `~` and start-path globs as unresolved instead of "delete nothing", since no shell expands them in the dry run. A find that fails with no matches says it could not measure.
