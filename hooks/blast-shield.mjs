@@ -105,7 +105,7 @@ export function register(on) {
       tally.refused += 1;
     }
     try {
-      $.ui.status(`shield: ${tally.held} held, ${tally.refused} refused, ${tally.ran} ran`);
+      $.ui.status(`${tally.held} held · ${tally.refused} refused · ${tally.ran} ran`);
       if (decision === "cancel") {
         $.ui.toast(`Blast Shield spared you: ${summary}`);
       }
