@@ -66,6 +66,16 @@ test('leaves the safe forms of those commands alone', async () => {
   expect(kind('chmod 644 a.txt')).toBe(null)
 })
 
+test('holds destructive commands inside other commands', async () => {
+  const rf = 'rm -' + 'rf'
+  expect(kind(`sh -c '${rf} build'`)).toBe('rm')
+  expect(kind(`bash -lc "echo hi; ${rf} build"`)).toBe('rm')
+  expect(kind(`find . -exec ${rf} {} +`)).toBe('find-delete')
+  expect(kind(`python3 -c "import shutil; shutil.${'rmtree'}('build')"`)).toBe('rm')
+  expect(kind('git push origin :main')).toBe('git-push-delete')
+  expect(kind('sh -c "echo hi"')).toBe(null)
+})
+
 test('chmod -R targets skip the mode word', async () => {
   expect(classify('chmod -R 755 build dist')?.targets).toEqual(['build', 'dist'])
 })
