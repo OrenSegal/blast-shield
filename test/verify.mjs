@@ -79,8 +79,71 @@ check("kubectl: never throws, has report", x.rep.summary.length > 0 && Array.isA
 x = await m("chmod -R 777 /");
 check("chmod 777 /: broad and world-writable", /broad folder/.test(imp(x)) && /every local user/.test(imp(x)), x.rep);
 
+// unresolved find paths are unknown blast, not zero
+const DEL = "-" + "delete";
+for (const c of ["find $PWD/build " + DEL, 'find "$(pwd)/build" ' + DEL, "find `pwd`/build " + DEL, "find ~/x " + DEL, "find bui* " + DEL, 'find . -name "$X" ' + DEL]) {
+  x = await m(c);
+  check(`unresolved find is not "nothing": ${c}`, /can't resolve/.test(x.rep.summary) && !/nothing/.test(x.rep.summary), x.rep);
+}
+x = await m("find build -name '*.nomatch' " + DEL);
+check("find with a quoted -name glob is still measured", /delete nothing/.test(x.rep.summary), x.rep);
+x = await m("find no-such-dir " + DEL);
+check("find that fails with no matches does not say nothing", /could not measure/.test(x.rep.summary), x.rep);
+
+// holds that hide inside another command
+const RF = "rm -" + "rf";
+const held = (c, kind) => check(`holds ${c}`, classify(c)?.kind === kind, classify(c));
+held(`sh -c '${RF} build'`, "rm");
+held(`bash -lc "${RF} build"`, "rm");
+held(`/bin/zsh -c '${RF} build; echo done'`, "rm");
+held(`sh -c 'echo hi && ${RF} build'`, "rm");
+held(`bash -c "sh -c '${RF} build'"`, "rm");
+held(`timeout 5 sh -c '${RF} build'`, "rm");
+x = await m(`sh -c '${RF} build; echo done'`);
+check("sh -c measures the script's target", /delete 2 files/.test(x.rep.summary) && x.r.targets[0] === "build", x.rep);
+check("sh -c script keeps the outer cd", classify(`cd sub && sh -c 'cd in && ${RF} y'`)?.dir === "sub/in", classify(`cd sub && sh -c 'cd in && ${RF} y'`));
+check("sh -c harmless script is not held", classify("sh -c 'echo hi; ls'") === null);
+check("sh script.sh is not held", classify("sh script.sh") === null);
+
+held(`find build -name x -exec ${RF} {} +`, "find-delete");
+held(`find build -name x -exec ${RF} {} \\;`, "find-delete");
+held("find build -type f -execdir rm {} +", "find-delete");
+held("find build -ok rm {} ';'", "find-delete");
+x = await m(`find build -name x -exec ${RF} {} +`);
+check("find -exec rm lists what it matches", x.rep.lines.length === 1 && x.rep.lines[0].includes("build/x") && /delete 1 path/.test(x.rep.summary), x.rep);
+x = await m(`find build -name x -exec touch ${join(d, "pwned3")} {} + -exec ${RF} {} +`);
+check("find -exec rm with another -exec is not dry-run", !existsSync(join(d, "pwned3")) && /didn't dry-run/.test(x.rep.note), x.rep);
+held(`find build -exec sh -c '${RF} "$1"' _ {} \\;`, "opaque");
+held("find build -exec git reset --hard \\;", "opaque");
+check("find -exec with a harmless command is not held", classify("find . -name x -exec cat {} +") === null);
+
+const TREE = "shutil." + "rmtree";
+held(`python3 -c "import shutil; ${TREE}('build')"`, "rm");
+x = await m(`python3 -c "import shutil; ${TREE}('build')"`);
+check("python rmtree of a literal is measured", /delete 2 files/.test(x.rep.summary), x.rep);
+held(`python -c 'import shutil, sys; ${TREE}(sys.argv[1])' build`, "opaque");
+check("python -c without rmtree is not held", classify("python3 -c 'import os; print(1)'") === null);
+
+const push = (a) => "git push " + a;
+held(push("origin :main"), "git-push-delete");
+held(push("origin :refs/heads/feat"), "git-push-delete");
+held(push("origin --" + "delete feat"), "git-push-delete");
+held(push("-d origin feat"), "git-push-delete");
+held(push("--force origin :feat"), "git-push-delete");
+check("git push of a src:dst refspec is not held", classify("git push origin feat:feat") === null);
+check("git push origin main is not held", classify("git push origin main") === null);
+sh("git update-ref refs/remotes/origin/gone HEAD && git update-ref refs/remotes/origin/only $(git commit-tree HEAD^{tree} -p HEAD -m only)", d);
+x = await m(push("origin :only"));
+check("remote branch delete lists commits no local branch has", /delete origin\/only/.test(x.rep.summary) && x.rep.lines.length === 1, x.rep);
+x = await m(push("origin :gone"));
+check("remote branch delete with nothing unique says so", /delete origin\/gone/.test(x.rep.summary) && x.rep.lines.length === 0, x.rep);
+x = await m(push("origin :unknown"));
+check("remote branch delete with no local copy says so", /fetch/.test(x.rep.note), x.rep);
+x = await m(push("origin :main"));
+check("remote delete of a shared branch is flagged", /shared branch/.test(imp(x)), x.rep);
+
 // classifier robustness
-for (const c of ["", "   ", ";;", "rm", "git", "git -C", "sudo", "timeout", "timeout 5", "env", "find", "xargs", "kubectl", "terraform", "docker", "psql", "chmod -R", "git restore", "git branch -D", "((("]) {
+for (const c of ["", "   ", ";;", "rm", "git", "git -C", "sudo", "timeout", "timeout 5", "env", "find", "xargs", "kubectl", "terraform", "docker", "psql", "chmod -R", "git restore", "git branch -D", "(((", "sh -c", "bash -c ''", "python3 -c", "find . -exec", "git push origin :"]) {
   try { classify(c); check(`no throw: ${JSON.stringify(c)}`, true); } catch (e) { check(`no throw: ${JSON.stringify(c)}`, false, String(e)); }
 }
 console.log(fails ? `${fails} FAILED` : "ALL PASS");

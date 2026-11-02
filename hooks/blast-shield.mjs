@@ -163,12 +163,26 @@ function joinDir(dir, arg) {
   return dir ? `${dir}/${arg}` : arg;
 }
 
+const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh"]);
+const PYTHON = /^(?:python[\d.]*|pypy3?)$/;
+// The quoted script of `sh -c '...'` or `python -c '...'`. Its ; && | belong to the script, not this line.
+const INLINE_SCRIPT = /((?:^|[\s;&|(])(?:\S*\/)?(?:sh|bash|zsh|dash|ksh|python[\d.]*|pypy3?)(?:\s+[^\s;&|'"]+)*?\s+-[a-zA-Z]*c[a-zA-Z]*\s+)('[^']*'|"(?:[^"\\]|\\.)*")/g;
+
+/** The line's segments, with inline scripts kept whole. */
+function splitLine(command) {
+  const scripts = [];
+  return command
+    .replace(INLINE_SCRIPT, (_, head, script) => `${head}\0${scripts.push(script) - 1}\0`)
+    .split(/&&|\|\||;|\||\n/)
+    .map((part) => part.replace(/\0(\d+)\0/g, (_, i) => scripts[i]));
+}
+
 /** The first risky segment of a shell command, or null. */
 export function classify(command) {
   let dir = null; // where a `cd` earlier on the line moved to; null means the session folder
   const scopes = []; // dir to restore when a ( subshell ) closes
   const pushed = []; // pushd stack, for popd
-  for (const raw of command.split(/&&|\|\||;|\||\n/)) {
+  for (const raw of splitLine(command)) {
     const opens = (raw.match(/^\s*\(+/)?.[0].trim().length) ?? 0;
     // Trailing redirects and & don't hide a closing ) : `(cd sub && make) > log`.
     const tail = raw.replace(/(?:\s*(?:\d*>>?|&>>?|<)\s*\S+|\s*&)+\s*$/, "");
@@ -257,6 +271,21 @@ function classifySegment(segment, dir, pushed) {
     if (cmd === "popd") {
       return { cd: pushed.length > 0 ? pushed.pop() : "-" };
     }
+    const base = cmd.split("/").pop();
+    const scriptAt = args.findIndex((a) => /^-[a-zA-Z]*c[a-zA-Z]*$/.test(a));
+    const script = scriptAt >= 0 ? args[scriptAt + 1]?.replace(/\\(["\\$`])/g, "$1") : undefined;
+    if (SHELLS.has(base) && script !== undefined) {
+      const inner = classify(script);
+      if (inner !== null) {
+        return { ...inner, dir: inner.dir ? joinDir(dir, inner.dir) : dir };
+      }
+    }
+    if (PYTHON.test(base) && script !== undefined && /\brmtree\s*\(/.test(script)) {
+      const literal = script.match(/\brmtree\s*\(\s*(['"])([^'"]+)\1\s*[,)]/);
+      return literal
+        ? { kind: "rm", label: "python shutil.rmtree", targets: [literal[2]], dir }
+        : { kind: "opaque", label: "python shutil.rmtree", note: "The path is worked out when the script runs, so I can't list what it would delete." };
+    }
     if (cmd === "rm" || cmd.endsWith("/rm")) {
       const flags = args.filter((a) => a.startsWith("-"));
       const recursive = flags.some((f) => f === "--recursive" || (/^-[^-]/.test(f) && /[rR]/.test(f)));
@@ -271,6 +300,12 @@ function classifySegment(segment, dir, pushed) {
     }
     if (cmd === "find" && args.includes("-" + "delete")) {
       return { kind: "find-delete", label: "find with its delete action", args, dir };
+    }
+    if (cmd === "find") {
+      const exec = classifyFindExec(args, dir);
+      if (exec !== null) {
+        return exec;
+      }
     }
     const infra = classifyInfra(cmd, args, dir);
     if (infra !== null) {
@@ -292,6 +327,14 @@ function classifySegment(segment, dir, pushed) {
       }
       const sub = args[i];
       const rest = args.slice(i + 1);
+      if (sub === "push") {
+        const plain = rest.filter((a) => !a.startsWith("-"));
+        const flagged = rest.some((a) => a === "--delete" || /^-[a-zA-Z]*d[a-zA-Z]*$/.test(a));
+        const refs = plain.slice(1).filter((a) => flagged || /^:./.test(a)).map((a) => a.replace(/^:/, "").replace(/^refs\/heads\//, ""));
+        if (refs.length > 0) {
+          return { kind: "git-push-delete", label: "git push that deletes a remote branch", remote: plain[0], refs, dir: gitDir };
+        }
+      }
       if (sub === "reset" && rest.includes("--hard")) {
         return { kind: "git-reset", label: "git reset --hard", args: rest, dir: gitDir };
       }
@@ -343,6 +386,37 @@ function classifySegment(segment, dir, pushed) {
     }
   }
   return null;
+}
+
+const FIND_EXEC = new Set(["-exec", "-execdir", "-ok", "-okdir"]);
+
+/** find running rm, or any other risky command, per match; otherwise null. */
+function classifyFindExec(args, dir) {
+  const rest = []; // the find without its rm clauses: what the dry run prints
+  let deletes = false;
+  for (let i = 0; i < args.length; i += 1) {
+    if (!FIND_EXEC.has(args[i])) {
+      rest.push(args[i]);
+      continue;
+    }
+    // The line split leaves `\` or `'` where `\;` or `';'` ended the clause.
+    let end = i + 1;
+    while (end < args.length && !/^(?:\\?;|\\|\+|')$/.test(args[end])) {
+      end += 1;
+    }
+    const words = args.slice(i + 1, end);
+    if (words[0]?.split("/").pop() === "rm") {
+      deletes = true;
+    } else {
+      const inner = classify(words.map((w) => (/\s/.test(w) ? JSON.stringify(w) : w)).join(" "));
+      if (inner !== null) {
+        return { kind: "opaque", label: `find ${args[i]} (${inner.label})`, note: "It runs that command once per match, so I can't measure what it would change." };
+      }
+      rest.push(...args.slice(i, end + 1));
+    }
+    i = end;
+  }
+  return deletes ? { kind: "find-delete", label: "find -exec rm", args: rest, dir } : null;
 }
 
 const SQL_CLIENTS = new Set(["psql", "mysql", "mariadb", "sqlite3", "sqlcmd", "mongosh", "redis-cli", "duckdb"]);
@@ -466,6 +540,9 @@ async function measureCore($, risk, cwd) {
     if (risk.kind === "git-branch-delete") {
       return await measureBranchDelete($, risk, cwd);
     }
+    if (risk.kind === "git-push-delete") {
+      return await measurePushDelete($, risk, cwd);
+    }
     if (risk.kind === "git-stash") {
       return await measureStash($, risk, cwd);
     }
@@ -575,6 +652,12 @@ async function consequences($, risk, cwd, report) {
           add(`Open pull request #${p.number} "${String(p.title).slice(0, 50)}" is on this branch: a force-push rewrites it and can stale reviews and approvals.`);
         }
       }
+    }
+  }
+
+  if (risk.kind === "git-push-delete") {
+    for (const ref of risk.refs.filter((r) => SHARED_BRANCH.test(r))) {
+      add(`"${ref}" looks like a shared branch: everyone using it loses it on their next fetch.`);
     }
   }
 
@@ -808,10 +891,19 @@ async function measureFindDelete($, risk, cwd) {
   if (risk.args.some((a) => FIND_SIDE_EFFECTS.has(a))) {
     return { summary: "find with its delete action", lines: [], note: "This find also runs commands or writes files, so I didn't dry-run it." };
   }
+  // No shell runs this dry run, so $VAR, ~ and start-path globs would be taken literally and match nothing.
+  const firstTest = risk.args.findIndex((a) => /^(?:-[a-zA-Z]{2,}|[(!\\])/.test(a));
+  const unresolved = risk.args.filter((a, i) => /[$`]/.test(a) || ((firstTest < 0 || i < firstTest) && /^~|[*?[]/.test(a)));
+  if (unresolved.length > 0) {
+    return { summary: `delete paths I can't resolve: ${unresolved.join(" ")}`, lines: [], note: "The arguments use shell variables, substitutions, ~ or globs that the shell would expand, so I can't measure it." };
+  }
   // The same find with the delete action swapped for -print: what it would remove.
   const argv = ["find", ...risk.args.filter((a) => a !== "-" + "delete"), "-print"];
   const run = await $.process.run(argv, { cwd, timeoutMs: 15000 });
   const found = run.stdout.split("\n").filter((l) => l !== "");
+  if (found.length === 0 && run.exitCode !== 0) {
+    return { summary: "find failed, so I could not measure what it would delete", lines: [], note: run.stderr.trim().slice(0, 200) };
+  }
   return {
     summary: found.length === 0 ? "delete nothing: find matches nothing" : `delete ${found.length} ${found.length === 1 ? "path" : "paths"}`,
     lines: found.slice(0, LIST_MAX),
@@ -828,6 +920,27 @@ async function measureBranchDelete($, risk, cwd) {
     lines.push(log.stdout.trim() !== "" ? `${name}: unpushed commits, tip ${log.stdout.trim()}` : `${name}: all commits exist on a remote branch`);
   }
   return { summary: `force-delete ${names.length} ${names.length === 1 ? "branch" : "branches"}`, lines, more: Math.max(0, names.length - LIST_MAX), note: "Unpushed commits are only reachable through the reflog after this." };
+}
+
+async function measurePushDelete($, risk, cwd) {
+  const lines = [];
+  const unknown = [];
+  for (const name of risk.refs.slice(0, LIST_MAX)) {
+    const ref = `${risk.remote}/${name}`;
+    const known = await $.process.run(["git", "rev-parse", "--verify", "--quiet", ref], { cwd, timeoutMs: 10000 });
+    if (known.exitCode !== 0) {
+      unknown.push(ref);
+      continue;
+    }
+    const log = await $.process.run(["git", "log", "--oneline", "--no-decorate", ref, "--not", "--branches", "--"], { cwd, timeoutMs: 15000 });
+    lines.push(...log.stdout.split("\n").filter((l) => l !== "").map((l) => `${ref}: ${l}`));
+  }
+  return {
+    summary: `delete ${risk.refs.map((r) => `${risk.remote}/${r}`).join(", ")} on the remote`,
+    lines: lines.slice(0, LIST_MAX),
+    more: Math.max(0, lines.length - LIST_MAX),
+    note: unknown.length > 0 ? `No local copy of ${unknown.join(", ")}, so I can't tell which commits only it has. Run git fetch first.` : "Commits listed are on no local branch, as of the last fetch.",
+  };
 }
 
 async function measureStash($, risk, cwd) {
@@ -935,6 +1048,7 @@ const UNDO = {
   "git-checkout": "Uncommitted changes to those files can't be recovered.",
   "git-clean": "No undo. Untracked files are not in git.",
   "git-push-force": "Dropped commits survive only in clones that have them.",
+  "git-push-delete": "Back only by pushing it again from a clone that still has it.",
   "git-branch-delete": "Recoverable from the reflog for a while, if you know the commit.",
   "git-stash": "Hard to recover: only through git fsck.",
   migrate: "May need a down-migration, or a database backup, to reverse.",
