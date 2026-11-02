@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.2.0
 
 - `find` with its delete action reports `$VAR`, `$(...)`, backticks, `~` and start-path globs as unresolved instead of "delete nothing", since no shell expands them in the dry run. A find that fails with no matches says it could not measure.
 - New holds: `sh -c` and similar shells (the script is classified as its own line), `find -exec rm` (measured with `-print`) and `find -exec` with another risky command, `python -c` with `shutil.rmtree`, and `git push` that deletes a remote branch (`:branch`, `--delete`, `-d`).
