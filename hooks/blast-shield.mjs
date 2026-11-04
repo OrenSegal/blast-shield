@@ -126,7 +126,9 @@ export function register(on) {
     return {
       deny: `Blast Shield held this command and did not run it: ${why}. It would have: ${summary}. It matched the rule for ${risk.label}.${impactForClaude(mine)} Do not retry it unless the user asks you to.`,
     };
-  });
+   }).catch(($, e, next) => next.called
+    ? next(e)
+    : { deny: "Blast Shield held this command and did not run it: it hit an error while checking it. Do not retry it unless the user asks you to." });
 
   on("ui.render", { component: "Pane" }, ($, e, next) => {
     if (e.requestId !== PANE_ID || held === null || held.report === null) {
@@ -788,6 +790,12 @@ async function measureRm($, risk, cwd) {
   };
 }
 
+// git status --porcelain codes (index, worktree) in words; the worktree column wins, as it is what gets discarded.
+function porcelainWord(row) {
+  const code = row[1] !== " " ? row[1] : row[0];
+  return { M: "modified", D: "deleted", A: "added", R: "renamed", C: "copied", U: "conflicted", T: "type changed" }[code] ?? code;
+}
+
 async function measureGit($, risk, cwd) {
   if (risk.kind === "git-push-force") {
     return await measurePush($, risk, cwd);
@@ -839,9 +847,9 @@ async function measureGit($, risk, cwd) {
   const stat = await $.process.run(["git", "diff", "--shortstat", ...(risk.kind === "git-reset" ? ["HEAD"] : ["--", ...pathspec])], { cwd, timeoutMs: 15000 });
   return {
     summary: lost.length === 0 ? "discard nothing: no uncommitted changes" : `discard uncommitted changes in ${lost.length} ${lost.length === 1 ? "file" : "files"}`,
-    lines: lost.slice(0, LIST_MAX).map((l) => `${l.slice(0, 2)} ${l.slice(3)}`),
+    lines: lost.slice(0, LIST_MAX).map((l) => `${porcelainWord(l)}  ${l.slice(3)}`),
     more: Math.max(0, lost.length - LIST_MAX),
-    note: stat.stdout.trim() !== "" ? `${stat.stdout.trim()}. Uncommitted changes can't be recovered.` : "From git status --porcelain.",
+    note: stat.stdout.trim() !== "" ? `${stat.stdout.trim()}.` : "From git status --porcelain.",
   };
 }
 
@@ -1064,7 +1072,7 @@ function whyHeld(state) {
   const partial = part.trim() !== command.trim();
   const shown = part.length > 80 ? `${part.slice(0, 80)}...` : part;
   return partial
-    ? `Matched "${shown}" (${risk.label}). Only that part was measured; Proceed runs the whole line.`
+    ? `Only "${shown}" was measured; Proceed runs the whole line.`
     : `Matched the rule for ${risk.label}.`;
 }
 
@@ -1075,7 +1083,7 @@ function undoLine(risk) {
   return UNDO[risk.kind] ?? null;
 }
 
-function draw(t, state) {
+export function draw(t, state) {
   const { Box, Text, Button } = t;
   const { report } = state;
   const list = report.lines.map((line, i) => Text({ key: `l${i}`, children: `  ${line}`, wrap: "truncate-end" }));
@@ -1094,7 +1102,7 @@ function draw(t, state) {
     borderColor: "yellow",
     paddingX: 1,
     children: [
-      Text({ key: "title", bold: true, color: "yellow", children: `⚠ Blast Shield · ${state.risk.label}` }),
+      Text({ key: "title", bold: true, color: "yellow", children: "⚠ Blast Shield held this command" }),
       Text({ key: "cmd", children: [Text({ dimColor: true, children: "Command  " }), Text({ bold: true, children: state.command.length > 300 ? `${state.command.slice(0, 300)}... (${state.command.length} characters)` : state.command })], wrap: "wrap" }),
       Text({ key: "sum", children: [Text({ dimColor: true, children: "Would    " }), Text({ color: "red", bold: true, children: report.summary })], wrap: "wrap" }),
       Text({ key: "why", children: [Text({ dimColor: true, children: "Held     " }), Text({ children: whyHeld(state) })], wrap: "wrap" }),
