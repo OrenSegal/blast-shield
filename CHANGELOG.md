@@ -1,7 +1,13 @@
 # Changelog
 
 
-## 1.2.1
+## 1.2.2
+
+- Pane copy no longer says things twice: the title is fixed, "Held" no longer repeats the command, and the unrecoverable warning shows once.
+- Changed-file rows use words (`deleted`, `modified`) instead of git status codes.
+- The Bash hook now refuses the command if it errors, instead of letting it run.
+- Test that the report draws with Proceed and Cancel on every surface.
+
 
 - Status line scoreboard is shorter: `1 held · 0 refused · 1 ran`, without the redundant `shield:` prefix.
 ## 1.2.0
