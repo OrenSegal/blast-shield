@@ -79,3 +79,46 @@ test('holds destructive commands inside other commands', async () => {
 test('chmod -R targets skip the mode word', async () => {
   expect(classify('chmod -R 755 build dist')?.targets).toEqual(['build', 'dist'])
 })
+
+const SURFACES = ['terminal', 'desktop', 'vscode', 'mobile'] as const
+const PANE = { plugin: 'blast-shield', component: 'Pane', requestId: 'blast-shield', props: { title: 'Blast Shield', isFocused: true, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 20 }, view: {} } } as const
+const BAND = { plugin: 'blast-shield', component: 'AbovePrompt', props: {} } as const
+
+// A surface that places the pane draws it there; one that doesn't gets the same report in the band.
+for (const placed of [true, false]) {
+  test(`a held command shows Proceed and Cancel on every surface (${placed ? 'pane' : 'band'})`, async ($, on) => {
+    on('session.cwd', () => ({ value: '/' }))
+    on('process.run', async (_, e: any) => {
+      if (e.argv?.[0] === 'sleep') await new Promise((r) => setTimeout(r, 20)) // yield, or the hold loop starves the test
+      return { value: { exitCode: 0, stdout: ' M a.js\n', stderr: '' } }
+    })
+    on('clock.now', () => ({ value: Date.now() }))
+    on('ui.invalidate', () => ({ value: undefined }))
+    on('ui.open', () => ({ value: { isPlaced: placed } }))
+    on('ui.close', () => ({ value: undefined }))
+    on('ui.status', () => ({ value: undefined }))
+    on('ui.toast', () => ({ value: undefined }))
+    on('ui.render', ($, e) => { const { Text } = $.ui.resolve(e); return <Text>engine</Text> })
+    on('tool.call', () => ({ result: {} }))
+
+    const call = $.tool.call({ tool: 'Bash', command: 'git checkout -- a.js 2>&1 | tail -1' })
+    const target = placed ? PANE : BAND
+    let ui = await $.ui.mount({ ...target, surface: 'desktop' })
+    for (let i = 0; i < 40 && !(await ui.find({ key: 'proceed' })); i++) {
+      await ui.unmount()
+      await new Promise((r) => setTimeout(r, 100))
+      ui = await $.ui.mount({ ...target, surface: 'desktop' })
+    }
+    await ui.unmount()
+    for (const surface of SURFACES) {
+      const m = await $.ui.mount({ ...target, surface })
+      expect(await m.find({ key: 'proceed' })).toBeTruthy()
+      expect(await m.find({ key: 'cancel' })).toBeTruthy()
+      await m.unmount()
+    }
+    const last = await $.ui.mount({ ...target, surface: 'desktop' })
+    await last.press({ key: 'cancel' })
+    await last.unmount()
+    expect(JSON.stringify(await call)).toMatch(/Cancel/)
+  })
+}

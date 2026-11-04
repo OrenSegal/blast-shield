@@ -16,5 +16,5 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      # Classifier tests (hooks/classify.test.ts) need the claude CLI; run them locally with `claude plugin test .`.
+      # Classifier tests (hooks/classify.test.tsx) need the claude CLI; run them locally with `claude plugin test .`.
       - run: node test/verify.mjs

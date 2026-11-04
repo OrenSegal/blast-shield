@@ -2,7 +2,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-const { classify, measure } = await import(new URL("../hooks/blast-shield.mjs", import.meta.url).href);
+const { classify, measure, draw } = await import(new URL("../hooks/blast-shield.mjs", import.meta.url).href);
 
 const $ = { process: { run: async (argv, o = {}) => {
   const r = spawnSync(argv[0], argv.slice(1), { cwd: o.cwd, encoding: "utf8", timeout: o.timeoutMs });
@@ -141,6 +141,18 @@ x = await m(push("origin :unknown"));
 check("remote branch delete with no local copy says so", /fetch/.test(x.rep.note), x.rep);
 x = await m(push("origin :main"));
 check("remote delete of a shared branch is flagged", /shared branch/.test(imp(x)), x.rep);
+
+
+// pane copy: nothing said twice, status codes in words
+sh("rm src/b.js", d);
+x = await m("git checkout -- src/b.js 2>&1 | tail -1; echo done");
+check("checkout row says deleted, not D", x.rep.lines[0] === "deleted  src/b.js", x.rep);
+check("checkout note does not repeat the undo line", !/recovered/.test(x.rep.note), x.rep);
+const flat = (n) => (n == null ? "" : typeof n === "string" ? n : Array.isArray(n) ? n.map(flat).join("") : flat(n.children));
+const tt = { Box: (o) => o, Text: (o) => o, Button: (o) => o };
+const pane = flat(draw(tt, { risk: x.r, command: "git checkout -- src/b.js 2>&1 | tail -1; echo done", report: x.rep, decision: null }));
+check("pane does not repeat the matched command in the title or Held", pane.split("git checkout -- src/b.js").length === 3 && !/Matched/.test(pane), pane);
+check("pane says the unrecoverable warning once", pane.split("can't be recovered").length === 2, pane);
 
 // classifier robustness
 for (const c of ["", "   ", ";;", "rm", "git", "git -C", "sudo", "timeout", "timeout 5", "env", "find", "xargs", "kubectl", "terraform", "docker", "psql", "chmod -R", "git restore", "git branch -D", "(((", "sh -c", "bash -c ''", "python3 -c", "find . -exec", "git push origin :"]) {
