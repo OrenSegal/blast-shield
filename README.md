@@ -86,12 +86,14 @@ claude plugin marketplace add OrenSegal/blast-shield
 claude plugin install blast-shield@blast-shield --scope user
 ```
 
+Where it shows: one report, drawn by whichever surface runs the session. The terminal CLI and the desktop app dock it as a pane; VS Code, mobile, or a terminal too narrow for a pane get the same report in the band above the prompt. The desktop app has no flag, so name the folder in `CLAUDE_CODE_PLUGIN_DIRS` (in the `env` block of `~/.claude/settings.json`), or install it with the marketplace commands above and run `/reload-plugins`.
+
 Try it in a throwaway folder: ask Claude to delete a build folder.
 
 ## Tests
 
 ```bash
-claude plugin test .     # classifier tests
+claude plugin test .     # classifier tests, and the pane on every surface
 node test/verify.mjs     # measures against a real temp git repo, with real processes
 ```
 
