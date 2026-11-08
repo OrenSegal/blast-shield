@@ -1,5 +1,12 @@
 # Blast Shield
 
+> **Moved.** Development of blast-shield moved to [sous/plugins/blast-shield](https://github.com/OrenSegal/sous/tree/main/plugins/blast-shield). The sous copy is the maintained one; this repo is kept for history. It stays Apache-2.0 there, with this repo's LICENSE and NOTICE, and remains a modified fork of Anthropic's Blast Radius (attribution below). Install it from the sous marketplace:
+>
+> ```bash
+> claude plugin marketplace add OrenSegal/sous
+> claude plugin install blast-shield@sous
+> ```
+
 [![test](https://github.com/OrenSegal/blast-shield/actions/workflows/test.yml/badge.svg)](https://github.com/OrenSegal/blast-shield/actions/workflows/test.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
